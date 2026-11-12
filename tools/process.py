@@ -15,6 +15,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -138,19 +139,60 @@ def cdn_size(url):
         return None
 
 
-def download(url, dest, progress_tag=''):
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=600) as r, open(dest, 'wb') as f:
-        total = int(r.headers.get('Content-Length') or 0)
-        got = 0
-        while True:
-            buf = r.read(4 * 1024 * 1024)
-            if not buf:
+def download(url, dest, expected=None, retries=12):
+    """下载到 dest，断点续传，直到字节数达到 expected。
+    优先 aria2c（多连接+续传+重试）；无 aria2c 时退回 Python 的 HTTP Range 续传循环。
+    CDN 会中途关连接——必须靠续传补齐，不能把 EOF 当作下完。"""
+    if os.path.exists(dest):
+        os.remove(dest)
+    # ---- 首选：aria2c ----
+    if shutil.which('aria2c'):
+        for attempt in range(3):
+            cmd = ['aria2c', '-x16', '-s16', '-k1M', '--continue=true', '--max-tries=8', '--retry-wait=5',
+                   '--file-allocation=none', '--allow-overwrite=true', '--auto-file-renaming=false',
+                   '--console-log-level=warn', '--summary-interval=120',
+                   '-d', os.path.dirname(dest) or '/tmp', '-o', os.path.basename(dest), '--', url]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
+            except Exception as e:
+                print('    aria2c 异常: %s' % str(e)[:100], flush=True)
                 break
-            f.write(buf); got += len(buf)
-            if total and got % (256 * 1024 * 1024) < 4 * 1024 * 1024:
-                print('    下载 %s: %.1f/%.1f GB' % (progress_tag, got / 1024**3, total / 1024**3), flush=True)
-    return os.path.getsize(dest)
+            size = os.path.getsize(dest) if os.path.exists(dest) else 0
+            print('    aria2c rc=%s 已下 %s/%s' % (r.returncode, size, expected), flush=True)
+            if (expected and size == expected) or (not expected and size):
+                return size
+            print('    aria2c: %s' % ((r.stderr or r.stdout or '')[-200:]), flush=True)
+            time.sleep(3 * (attempt + 1))
+    # ---- 退回：Python HTTP Range 续传 ----
+    got = os.path.getsize(dest) if os.path.exists(dest) else 0
+    for attempt in range(retries):
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        if got:
+            headers['Range'] = 'bytes=%d-' % got
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=600) as r:
+                resume = got and getattr(r, 'status', 200) == 206
+                if not resume:
+                    got = 0
+                with open(dest, 'ab' if resume else 'wb') as f:
+                    while True:
+                        buf = r.read(8 * 1024 * 1024)
+                        if not buf:
+                            break
+                        f.write(buf); got += len(buf)
+                        if expected and got % (512 * 1024 * 1024) < 8 * 1024 * 1024:
+                            print('    下载 %s: %.2f/%.2f GB' % (os.path.basename(dest), got / 1024**3, expected / 1024**3), flush=True)
+        except Exception as e:
+            print('    下载中断(第%d次) @ %d 字节: %s' % (attempt + 1, got, str(e)[:90]), flush=True)
+        size = os.path.getsize(dest) if os.path.exists(dest) else 0
+        if expected:
+            if size == expected:
+                return size
+            got = size
+            time.sleep(min(30, 3 * (attempt + 1)))
+        else:
+            return size
+    return os.path.getsize(dest) if os.path.exists(dest) else 0
 
 
 def rclone_upload(local_path, remote_name, folder_id):
@@ -319,7 +361,7 @@ def main():
                 local = os.path.join('/tmp', re.sub(r'[^\w.\-]+', '_', new_name))
                 print('  ↓ %s (源 %s 字节)' % (new_name, src_size))
                 try:
-                    download(url, local, new_name)
+                    download(url, local, expected=src_size)
                 except Exception as e:
                     print('  下载失败', str(e)[:100])
                     if os.path.exists(local): os.remove(local)
