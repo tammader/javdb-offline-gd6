@@ -1,0 +1,14 @@
+name: probe-cdn
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: probe
+        env:
+          WXYP_ACCOUNTS: ${{ secrets.WXYP_ACCOUNTS }}
+        run: python3 tools/probe_cdn.py
