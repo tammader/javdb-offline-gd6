@@ -227,6 +227,17 @@ def main():
             print('登录失败: %s' % tag)
 
     # ===== 阶段1：提交离线（未离线的链接，按账号额度均分）=====
+    # 每日额度记账：每账号每天最多 OFFLINE_DAILY_LIMIT 个（默认30）。多次跑时不会重复提交。
+    today = time.strftime('%Y-%m-%d')
+    q = state.setdefault('offline_quota', {})
+    if q.get('date') != today:
+        q['date'] = today
+        q['used'] = {}
+    used = q.setdefault('used', {})
+    DAILY_LIMIT = int(os.environ.get('OFFLINE_DAILY_LIMIT', '30'))
+    for i in range(len(clients)):
+        print('  账号%d 今日剩余额度: %d/%d' % (i, max(0, DAILY_LIMIT - int(used.get(str(i), 0))), DAILY_LIMIT))
+
     todo = [x for x in links if norm_code(x.get('code', '')) not in state['offlined'] and norm_code(x.get('code','')) not in state['done']]
     print('待离线 %d 条' % len(todo))
     per = {}
@@ -234,11 +245,13 @@ def main():
         code = norm_code(x.get('code', ''))
         if not code:
             continue
-        acct_idx = i % len(clients) if clients else 0
         if not clients:
             break
+        acct_idx = i % len(clients)
+        remain = DAILY_LIMIT - int(used.get(str(acct_idx), 0))
+        limit = min(MAX_OFFLINE, max(0, remain))
         per.setdefault(acct_idx, [])
-        if len(per[acct_idx]) >= MAX_OFFLINE:
+        if len(per[acct_idx]) >= limit:
             continue
         per[acct_idx].append((code, x['link']))
     for idx, lst in per.items():
@@ -251,6 +264,7 @@ def main():
             if ok:
                 # state 只存账号序号，绝不把账号写进会 commit 回公开仓库的文件
                 state['offlined'][code] = {'account_idx': idx, 'ts': time.strftime('%Y-%m-%d %H:%M')}
+                used[str(idx)] = int(used.get(str(idx), 0)) + 1
     save_state(state)
 
     # ===== 阶段2：扫描已完成离线的文件，下载→传gd6→归档 =====
