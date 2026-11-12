@@ -1,19 +1,20 @@
 name: offline-download-gd6
 
-# 每天跑一次；也可手动触发。
-# 流程：读 links.json 的 ed2k/magnet → 离线到两个无限云盘(各每天30额度) → 等完成 → 下载 → clean_name 重命名 → 上传 gd6/老 → 记录(state.json 提交回库)。
-# 每轮下载+上传有数量上限(MAX_TRANSFER)避免超 6 小时；靠 state 增量推进。
+# 每 6 小时跑一次；也可手动触发。
+# 流程：离线 ed2k/magnet 到两个无限云盘(各每天30额度) → 完成 → 下载 → clean_name 重命名 → 上传 gd6/老 → 源文件打「已搬_」标记 → 记录(state.json)。
+# 离线提交有每日额度记账：一天只需头一轮提交，后续轮次不会重复提交。
+# 每轮下载+上传数量上限 MAX_TRANSFER，避免超 350 分钟 job 上限（单个大文件约 1 小时）。
 on:
   schedule:
-    - cron: '30 20 * * *'   # UTC 20:30 = 北京 04:30
+    - cron: '30 */6 * * *'   # 每6小时(UTC 00:30/06:30/12:30/18:30 = 北京 08:30/14:30/20:30/02:30)
   workflow_dispatch:
     inputs:
       max_offline:
-        description: '每个无限云盘账号本轮最多提交离线数(=每日额度)'
+        description: '每个无限云盘账号本轮最多提交离线数'
         default: '30'
       max_transfer:
-        description: '本轮最多下载+上传几个(防6h超时)'
-        default: '5'
+        description: '本轮最多下载+上传几个(防超时)'
+        default: '3'
       selftest:
         description: 'true=只测 rclone 上传链路(5MB)，不跑流程'
         default: 'false'
@@ -36,7 +37,8 @@ jobs:
       GD_CLIENT_SECRET: ${{ secrets.GD_CLIENT_SECRET }}
       GD_REFRESH_TOKEN: ${{ secrets.GD_REFRESH_TOKEN }}
       MAX_OFFLINE_PER_ACCOUNT: ${{ github.event.inputs.max_offline || '30' }}
-      MAX_TRANSFER: ${{ github.event.inputs.max_transfer || '5' }}
+      MAX_TRANSFER: ${{ github.event.inputs.max_transfer || '3' }}
+      OFFLINE_DAILY_LIMIT: '30'
       GDRIVE_FOLDER: '老'
       ARCHIVE_FOLDER: '已搬gd6'
       STATE_FILE: state.json
