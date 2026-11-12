@@ -129,14 +129,27 @@ class GDrive:
         return True
 
 
-def cdn_size(url):
-    """无限云盘 CDN 侧真实字节数（HEAD Content-Length）。元数据 fileList.size 会虚报，不能用。"""
-    try:
-        req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return int(r.headers.get('Content-Length') or 0) or None
-    except Exception:
-        return None
+def cdn_size(url, tries=3):
+    """无限云盘 CDN 侧真实字节数。HEAD 失败时用 Range GET 的 Content-Range 兜底。
+    （元数据 fileList.size 会虚报，不可信；此值同时用于去重与就绪判断）"""
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                if r.headers.get('Content-Length'):
+                    return int(r.headers['Content-Length'])
+        except Exception:
+            pass
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Range': 'bytes=0-0'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                cr = r.headers.get('Content-Range') or ''
+                if '/' in cr:
+                    return int(cr.rsplit('/', 1)[1])
+        except Exception:
+            pass
+        time.sleep(2 * (i + 1))
+    return None
 
 
 def cdn_probe(url, offset, span=64):
@@ -163,9 +176,13 @@ def cdn_ready(url, size):
     return True
 
 
-def download(url, dest, expected=None, url_refresh=None, rounds=3):
+class CDNBlocked(Exception):
+    """CDN 返回 401/403：限流或封禁。此时应立刻停手，留给下一轮，不要硬刚。"""
+
+
+def download(url, dest, expected=None, url_refresh=None, rounds=2):
     """下载到 dest：aria2c 多连接 + Range 续传，直到字节数达到 expected。
-    失败时可用 url_refresh() 换取新的签名直链再续传（同一文件的旧直链可能已失效/节点不佳）。"""
+    被 CDN 拒绝(401/403)时立即抛 CDNBlocked，由调用方延后到下一轮。"""
     if os.path.exists(dest):
         os.remove(dest)
     best = 0
@@ -175,12 +192,12 @@ def download(url, dest, expected=None, url_refresh=None, rounds=3):
 
     for rnd in range(rounds):
         u = url
-        # --- 1) aria2c 多连接 ---
+        # --- 1) aria2c（并发降到 4，避免触发 CDN 限流/封禁）---
         if shutil.which('aria2c'):
             for attempt in range(2):
-                cmd = ['aria2c', '-x16', '-s16', '-k1M', '--continue=true', '--max-tries=8', '--retry-wait=8',
-                       '--timeout=90', '--file-allocation=none', '--allow-overwrite=true', '--auto-file-renaming=false',
-                       '--console-log-level=warn', '--summary-interval=120',
+                cmd = ['aria2c', '-x4', '-s4', '-k1M', '--continue=true', '--max-tries=3', '--retry-wait=15',
+                       '--timeout=60', '--file-allocation=none', '--allow-overwrite=true', '--auto-file-renaming=false',
+                       '--console-log-level=warn', '--summary-interval=180',
                        '-d', os.path.dirname(dest) or '/tmp', '-o', os.path.basename(dest), '--', u]
                 try:
                     r = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
@@ -191,13 +208,15 @@ def download(url, dest, expected=None, url_refresh=None, rounds=3):
                 best = max(best, s)
                 if expected and s == expected:
                     return s
-                print('    aria2c rc=%s 已下 %s/%s' % (r.returncode, s, expected), flush=True)
-                if (r.stderr or '').strip():
-                    print('    aria2c: %s' % (r.stderr.strip().splitlines()[-1][:150]), flush=True)
-                time.sleep(6)
+                err = ((r.stderr or '') + (r.stdout or ''))
+                print('    aria2c rc=%s 已下 %s/%s%s' % (r.returncode, s, expected,
+                      (' | ' + err.strip().splitlines()[-1][:120]) if err.strip() else ''), flush=True)
+                if '403' in err or '401' in err:
+                    raise CDNBlocked('aria2c 收到 403/401（限流或封禁）')
+                time.sleep(8)
         # --- 2) Python HTTP Range 续传 ---
         got = _size()
-        for attempt in range(8):
+        for attempt in range(5):
             headers = {'User-Agent': 'Mozilla/5.0'}
             if got:
                 headers['Range'] = 'bytes=%d-' % got
@@ -215,21 +234,25 @@ def download(url, dest, expected=None, url_refresh=None, rounds=3):
                             best = max(best, got)
                             if expected and got % (512 * 1024 * 1024) < 8 * 1024 * 1024:
                                 print('    下载 %s: %.2f/%.2f GB' % (os.path.basename(dest), got / 1024**3, expected / 1024**3), flush=True)
-            except Exception as e:
-                print('    下载中断(第%d次) @ %d 字节: %s' % (attempt + 1, got, str(e)[:80]), flush=True)
-                if url_refresh:      # 换新直链（旧直链/旧节点可能不可用）
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    raise CDNBlocked('HTTP %s（限流或封禁）' % e.code)
+                print('    下载中断(第%d次) @ %d 字节: HTTP %s' % (attempt + 1, got, e.code), flush=True)
+                if url_refresh and e.code == 416:
                     try:
                         nu = url_refresh()
                         if nu:
                             u = nu
                     except Exception:
                         pass
+            except Exception as e:
+                print('    下载中断(第%d次) @ %d 字节: %s' % (attempt + 1, got, str(e)[:70]), flush=True)
             s = _size()
             if expected:
                 if s == expected:
                     return s
                 got = s
-                time.sleep(min(25, 3 * (attempt + 1)))
+                time.sleep(min(20, 4 * (attempt + 1)))
             else:
                 return s
         if url_refresh:
@@ -240,7 +263,7 @@ def download(url, dest, expected=None, url_refresh=None, rounds=3):
             except Exception:
                 pass
         print('  第%d轮未下满 (%s/%s)，稍后继续' % (rnd + 1, best, expected), flush=True)
-        time.sleep(15)
+        time.sleep(20)
     return best
 
 
@@ -394,9 +417,13 @@ def main():
                 if not url:
                     print('  取直链失败 %s: %s' % (name, err)); continue
                 src_size = cdn_size(url)      # CDN 真实字节数（无限云盘元数据 size 会虚报，不可信）
+                if not src_size:
+                    # 取不到源大小 = CDN 不可用/被限流，绝不能硬下，更不能误删 gd6 里已有的好文件
+                    print('  取不到源大小(CDN 不可用或限流)，本轮跳过，下轮重试: %s' % new_name)
+                    continue
                 existing = gd.find_file(new_name, gd_parent)
                 # 防重复：gd6 里已有同名且字节数一致 → 真完成，跳过（顺手把源文件打标记）
-                if existing and src_size and int(existing.get('size') or 0) == src_size:
+                if existing and int(existing.get('size') or 0) == src_size:
                     if code and code not in state['done']:
                         state['done'].append(code); save_state(state)
                     print('  已完成(gd6 字节一致 %s)，跳过: %s' % (src_size, new_name))
@@ -407,7 +434,7 @@ def main():
                     print('  gd6 同名文件字节不符(现 %s / 源 %s) → 删除重传' % (existing.get('size'), src_size))
                     gd.delete_file(existing['id'])
                 # CDN 就绪检查：云端离线文件在 CDN 上是逐步铺满的，没铺满就先跳过（不占尝试次数），下轮再来
-                if src_size and not cdn_ready(url, src_size):
+                if not cdn_ready(url, src_size):
                     print('  云端尚未就绪，本轮跳过，下轮重试: %s' % new_name)
                     continue
                 attempts += 1
@@ -420,14 +447,25 @@ def main():
 
                 try:
                     download(url, local, expected=src_size, url_refresh=_refresh)
+                except CDNBlocked as e:
+                    # CDN 限流/封禁：立刻放手，记录次数，留给下一轮（不占用搬运配额、不硬刚）
+                    key = code or new_name
+                    blk = state.setdefault('blocked', {})
+                    n = int((blk.get(key) or {}).get('count', 0)) + 1
+                    blk[key] = {'count': n, 'ts': time.strftime('%Y-%m-%d %H:%M'), 'msg': str(e)[:60]}
+                    save_state(state)
+                    print('  CDN 限流/封禁(%s) → 本轮放弃，下轮重试（第 %d 次）: %s' % (str(e)[:40], n, new_name))
+                    if os.path.exists(local): os.remove(local)
+                    continue
                 except Exception as e:
                     print('  下载失败', str(e)[:100])
                     if os.path.exists(local): os.remove(local)
                     continue
-                got = os.path.getsize(local)
-                if src_size and got != src_size:
+                got = os.path.getsize(local) if os.path.exists(local) else 0
+                if got != src_size:
                     print('  下载不完整(%s/%s) → 本轮放弃，下轮重试' % (got, src_size))
-                    os.remove(local); continue
+                    if os.path.exists(local): os.remove(local)
+                    continue
                 print('  ↑ 上传 gd6 (rclone): %s' % new_name)
                 try:
                     rclone_upload(local, new_name, gd_parent)
@@ -438,6 +476,7 @@ def main():
                 try: os.remove(local)
                 except Exception: pass
                 state['done'].append(code or new_name)
+                state.get('blocked', {}).pop(code or new_name, None)   # 成功后清掉限流记录
                 save_state(state)
                 transferred += 1
                 print('  ✓ 完成 %s' % new_name)
