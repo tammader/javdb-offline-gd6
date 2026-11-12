@@ -1,0 +1,75 @@
+name: offline-download-gd6
+
+# 每天跑一次；也可手动触发。
+# 流程：读 links.json 的 ed2k/magnet → 离线到两个无限云盘(各每天30额度) → 等完成 → 下载 → clean_name 重命名 → 上传 gd6/老 → 记录(state.json 提交回库)。
+# 每轮下载+上传有数量上限(MAX_TRANSFER)避免超 6 小时；靠 state 增量推进。
+on:
+  schedule:
+    - cron: '30 20 * * *'   # UTC 20:30 = 北京 04:30
+  workflow_dispatch:
+    inputs:
+      max_offline:
+        description: '每个无限云盘账号本轮最多提交离线数(=每日额度)'
+        default: '30'
+      max_transfer:
+        description: '本轮最多下载+上传几个(防6h超时)'
+        default: '5'
+      selftest:
+        description: 'true=只测 rclone 上传链路(5MB)，不跑流程'
+        default: 'false'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: offline-download-gd6
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      WXYP_ACCOUNTS: ${{ secrets.WXYP_ACCOUNTS }}
+      WXYP_LINKS: ${{ secrets.WXYP_LINKS }}
+      GD_CLIENT_ID: ${{ secrets.GD_CLIENT_ID }}
+      GD_CLIENT_SECRET: ${{ secrets.GD_CLIENT_SECRET }}
+      GD_REFRESH_TOKEN: ${{ secrets.GD_REFRESH_TOKEN }}
+      MAX_OFFLINE_PER_ACCOUNT: ${{ github.event.inputs.max_offline || '30' }}
+      MAX_TRANSFER: ${{ github.event.inputs.max_transfer || '5' }}
+      GDRIVE_FOLDER: '老'
+      ARCHIVE_FOLDER: '已搬gd6'
+      STATE_FILE: state.json
+      LINKS_FILE: links.json
+      RCLONE_SELFTEST: ${{ github.event.inputs.selftest == 'true' && 'true' || '' }}
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 装 rclone (照抄 gd-backup 的方式)
+        run: |
+          curl -s https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/r.zip
+          unzip -q -o /tmp/r.zip -d /tmp
+          cp /tmp/rclone-*/rclone /usr/local/bin/
+          rclone version | head -1
+
+      - name: Run pipeline
+        run: |
+          python tools/process.py
+
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f state.json || true
+          if git diff --cached --quiet; then
+            echo "no state change"
+          else
+            git commit -m "chore: update offline state $(date -u +%Y-%m-%d)"
+            for i in 1 2 3; do git pull --rebase --autostash origin main && git push && break; echo retry $i; sleep 5; done
+          fi
