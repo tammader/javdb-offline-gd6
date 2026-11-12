@@ -113,40 +113,29 @@ class GDrive:
     def find_or_make(self, name, parent='root'):
         return self.find_folder(name, parent) or self.make_folder(name, parent)
 
-    def file_exists(self, name, parent):
+    def find_file(self, name, parent):
+        """返回 gd6 中同名文件 {id,name,size} 或 None。"""
         q = urllib.parse.quote("name='%s' and '%s' in parents and trashed=false" % (name.replace("'", "\\'"), parent))
-        req = urllib.request.Request('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id)', headers={'Authorization': 'Bearer ' + self.token()})
+        req = urllib.request.Request('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name,size)',
+                                     headers={'Authorization': 'Bearer ' + self.token()})
         d = json.loads(urllib.request.urlopen(req, timeout=30).read())
-        return bool(d.get('files'))
+        return d['files'][0] if d.get('files') else None
 
-    def upload_file(self, local_path, remote_name, parent_id):
-        size = os.path.getsize(local_path)
-        meta = json.dumps({'name': remote_name, 'parents': [parent_id]}).encode()
-        req = urllib.request.Request(
-            'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true',
-            data=meta, method='POST',
-            headers={'Authorization': 'Bearer ' + self.token(), 'Content-Type': 'application/json; charset=UTF-8',
-                     'X-Upload-Content-Type': 'application/octet-stream', 'X-Upload-Content-Length': str(size)})
-        session = urllib.request.urlopen(req, timeout=60).headers['Location']
-        CHUNK = 32 * 1024 * 1024
-        offset = 0
-        with open(local_path, 'rb') as f:
-            while offset < size:
-                chunk = f.read(CHUNK)
-                end = offset + len(chunk) - 1
-                req = urllib.request.Request(session, data=chunk, method='PUT',
-                                             headers={'Content-Length': str(len(chunk)),
-                                                      'Content-Range': 'bytes %d-%d/%d' % (offset, end, size)})
-                try:
-                    urllib.request.urlopen(req, timeout=600)
-                    offset = size
-                except urllib.error.HTTPError as e:
-                    if e.code == 308:
-                        rng = e.headers.get('Range')
-                        offset = int(rng.split('-')[1]) + 1 if rng else offset + len(chunk)
-                    else:
-                        raise
-        return remote_name
+    def delete_file(self, fid):
+        req = urllib.request.Request('https://www.googleapis.com/drive/v3/files/' + fid, method='DELETE',
+                                     headers={'Authorization': 'Bearer ' + self.token()})
+        urllib.request.urlopen(req, timeout=60)
+        return True
+
+
+def cdn_size(url):
+    """无限云盘 CDN 侧真实字节数（HEAD Content-Length）。元数据 fileList.size 会虚报，不能用。"""
+    try:
+        req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return int(r.headers.get('Content-Length') or 0) or None
+    except Exception:
+        return None
 
 
 def download(url, dest, progress_tag=''):
@@ -296,24 +285,35 @@ def main():
                     continue
                 code = norm_code(name)
                 new_name = clean_name(name)   # 初始重命名（番号开头），仅用于 gd6 文件名
-                # 防重复：state.done 或 gd6 已存在同名文件 → 跳过（不占尝试次数）
-                if code in state['done'] or gd.file_exists(new_name, gd_parent):
-                    if code and code not in state['done']:
-                        state['done'].append(code); save_state(state)
-                    print('  已完成/已存在，跳过: %s' % new_name)
-                    continue
                 url, err = c.prepare_play(f.get('fileId'), f.get('shareId') or '')
                 if not url:
                     print('  取直链失败 %s: %s' % (name, err)); continue
+                src_size = cdn_size(url)      # CDN 真实字节数（无限云盘元数据 size 会虚报，不可信）
+                existing = gd.find_file(new_name, gd_parent)
+                # 防重复：gd6 里已有同名且字节数一致 → 真完成，跳过（顺手把源文件打标记）
+                if existing and src_size and int(existing.get('size') or 0) == src_size:
+                    if code and code not in state['done']:
+                        state['done'].append(code); save_state(state)
+                    print('  已完成(gd6 字节一致 %s)，跳过: %s' % (src_size, new_name))
+                    _mark_source(c, f, name)
+                    continue
+                # gd6 里同名但字节不符（半截/旧文件）→ 删除重传
+                if existing:
+                    print('  gd6 同名文件字节不符(现 %s / 源 %s) → 删除重传' % (existing.get('size'), src_size))
+                    gd.delete_file(existing['id'])
                 attempts += 1
                 local = os.path.join('/tmp', re.sub(r'[^\w.\-]+', '_', new_name))
-                print('  ↓ %s (%s)' % (new_name, f.get('size')))
+                print('  ↓ %s (源 %s 字节)' % (new_name, src_size))
                 try:
                     download(url, local, new_name)
                 except Exception as e:
                     print('  下载失败', str(e)[:100])
                     if os.path.exists(local): os.remove(local)
                     continue
+                got = os.path.getsize(local)
+                if src_size and got != src_size:
+                    print('  下载不完整(%s/%s) → 放弃本轮' % (got, src_size))
+                    os.remove(local); continue
                 print('  ↑ 上传 gd6 (rclone): %s' % new_name)
                 try:
                     rclone_upload(local, new_name, gd_parent)
@@ -327,29 +327,22 @@ def main():
                 save_state(state)
                 transferred += 1
                 print('  ✓ 完成 %s' % new_name)
-                # 归档：仅尝试给源文件加「已搬_」前缀标记（best-effort，失败不影响）
-                try:
-                    c.rename(f.get('fileId'), '已搬_' + name)
-                except Exception:
-                    pass
+                _mark_source(c, f, name)
     print('\n本轮搬运 %d 个' % transferred)
 
 
-def _archive(c, f, stack_root_id='0'):
-    """把源文件移到根目录下的「已搬gd6」文件夹。"""
+def _mark_source(c, f, name):
+    """给源文件加「已搬_」标记（保留清理后的名字）。
+    必须用真正生效的 /disk/rename(id,name)——/file/rename 会假成功。"""
     try:
-        root = c.list_dir('0')
-        arch = next((x for x in root if x.get('name') == ARCHIVE and (str(x.get('type')) == '2')), None)
-        if not arch:
-            c.add_folder('0', ARCHIVE)
-            time.sleep(2)
-            root = c.list_dir('0')
-            arch = next((x for x in root if x.get('name') == ARCHIVE), None)
-        if arch:
-            r = c.move(f.get('id'), arch.get('id'))
-            print('    归档到「%s」: %s' % (ARCHIVE, r.get('code') == 200))
+        marked = '已搬_' + clean_name(name)
+        if marked == name:
+            return
+        r = c.rename(f.get('id'), marked)
+        ok = (r.get('code') == 200)
+        print('    源文件标记: %s -> %s [%s]' % (name, marked, 'OK' if ok else r.get('msg')))
     except Exception as e:
-        print('    归档失败', str(e)[:100])
+        print('    源文件标记失败: %s' % str(e)[:80])
 
 
 if __name__ == '__main__':
