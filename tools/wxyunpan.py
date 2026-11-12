@@ -94,6 +94,8 @@ class WxYunPan:
     def add_folder(self, parent_id, name):
         return self._req("/disk/addFolder", "POST", {"parentId": parent_id, "name": name})
 
-    def rename(self, file_db_id, new_name, is_dir=False):
-        path = "/disk/rename" if is_dir else "/file/rename"
-        return self._req(path, "POST", {"id": file_db_id, "name": new_name})
+    def rename(self, file_db_id, new_name):
+        """重命名文件/文件夹（用数据库 id）。
+        注意：/file/rename 会返回 200「重命名成功」但实际不生效；
+        真正生效的是 /disk/rename（body {id, name}）。"""
+        return self._req("/disk/rename", "POST", {"id": file_db_id, "name": new_name})
