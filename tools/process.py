@@ -139,60 +139,109 @@ def cdn_size(url):
         return None
 
 
-def download(url, dest, expected=None, retries=12):
-    """下载到 dest，断点续传，直到字节数达到 expected。
-    优先 aria2c（多连接+续传+重试）；无 aria2c 时退回 Python 的 HTTP Range 续传循环。
-    CDN 会中途关连接——必须靠续传补齐，不能把 EOF 当作下完。"""
+def cdn_probe(url, offset, span=64):
+    """探测 CDN 某偏移是否可下（206/200 即可下）。"""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0',
+                                                   'Range': 'bytes=%d-%d' % (offset, offset + span - 1)})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status in (200, 206)
+    except Exception:
+        return False
+
+
+def cdn_ready(url, size):
+    """抽查几段，判断 CDN 上该文件是否已完整可用。
+    无限云盘的离线文件在 CDN 上是【按需回源、逐步铺满】的：
+    未铺满时越界区间会返回 416。没就绪就别硬下，留给下一轮。"""
+    if not size:
+        return True
+    for off in (0, size // 4, size // 2, (size * 3) // 4, max(0, size - 64)):
+        if not cdn_probe(url, off):
+            print('    CDN 未就绪：偏移 %d 不可下（云端还没铺满）' % off, flush=True)
+            return False
+    return True
+
+
+def download(url, dest, expected=None, url_refresh=None, rounds=3):
+    """下载到 dest：aria2c 多连接 + Range 续传，直到字节数达到 expected。
+    失败时可用 url_refresh() 换取新的签名直链再续传（同一文件的旧直链可能已失效/节点不佳）。"""
     if os.path.exists(dest):
         os.remove(dest)
-    # ---- 首选：aria2c ----
-    if shutil.which('aria2c'):
-        for attempt in range(3):
-            cmd = ['aria2c', '-x16', '-s16', '-k1M', '--continue=true', '--max-tries=8', '--retry-wait=5',
-                   '--file-allocation=none', '--allow-overwrite=true', '--auto-file-renaming=false',
-                   '--console-log-level=warn', '--summary-interval=120',
-                   '-d', os.path.dirname(dest) or '/tmp', '-o', os.path.basename(dest), '--', url]
+    best = 0
+
+    def _size():
+        return os.path.getsize(dest) if os.path.exists(dest) else 0
+
+    for rnd in range(rounds):
+        u = url
+        # --- 1) aria2c 多连接 ---
+        if shutil.which('aria2c'):
+            for attempt in range(2):
+                cmd = ['aria2c', '-x16', '-s16', '-k1M', '--continue=true', '--max-tries=8', '--retry-wait=8',
+                       '--timeout=90', '--file-allocation=none', '--allow-overwrite=true', '--auto-file-renaming=false',
+                       '--console-log-level=warn', '--summary-interval=120',
+                       '-d', os.path.dirname(dest) or '/tmp', '-o', os.path.basename(dest), '--', u]
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
+                except Exception as e:
+                    print('    aria2c 异常: %s' % str(e)[:90], flush=True)
+                    break
+                s = _size()
+                best = max(best, s)
+                if expected and s == expected:
+                    return s
+                print('    aria2c rc=%s 已下 %s/%s' % (r.returncode, s, expected), flush=True)
+                if (r.stderr or '').strip():
+                    print('    aria2c: %s' % (r.stderr.strip().splitlines()[-1][:150]), flush=True)
+                time.sleep(6)
+        # --- 2) Python HTTP Range 续传 ---
+        got = _size()
+        for attempt in range(8):
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            if got:
+                headers['Range'] = 'bytes=%d-' % got
             try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
+                with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=600) as r:
+                    resume = got and getattr(r, 'status', 200) == 206
+                    if not resume:
+                        got = 0
+                    with open(dest, 'ab' if resume else 'wb') as f:
+                        while True:
+                            buf = r.read(8 * 1024 * 1024)
+                            if not buf:
+                                break
+                            f.write(buf); got += len(buf)
+                            best = max(best, got)
+                            if expected and got % (512 * 1024 * 1024) < 8 * 1024 * 1024:
+                                print('    下载 %s: %.2f/%.2f GB' % (os.path.basename(dest), got / 1024**3, expected / 1024**3), flush=True)
             except Exception as e:
-                print('    aria2c 异常: %s' % str(e)[:100], flush=True)
-                break
-            size = os.path.getsize(dest) if os.path.exists(dest) else 0
-            print('    aria2c rc=%s 已下 %s/%s' % (r.returncode, size, expected), flush=True)
-            if (expected and size == expected) or (not expected and size):
-                return size
-            print('    aria2c: %s' % ((r.stderr or r.stdout or '')[-200:]), flush=True)
-            time.sleep(3 * (attempt + 1))
-    # ---- 退回：Python HTTP Range 续传 ----
-    got = os.path.getsize(dest) if os.path.exists(dest) else 0
-    for attempt in range(retries):
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        if got:
-            headers['Range'] = 'bytes=%d-' % got
-        try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=600) as r:
-                resume = got and getattr(r, 'status', 200) == 206
-                if not resume:
-                    got = 0
-                with open(dest, 'ab' if resume else 'wb') as f:
-                    while True:
-                        buf = r.read(8 * 1024 * 1024)
-                        if not buf:
-                            break
-                        f.write(buf); got += len(buf)
-                        if expected and got % (512 * 1024 * 1024) < 8 * 1024 * 1024:
-                            print('    下载 %s: %.2f/%.2f GB' % (os.path.basename(dest), got / 1024**3, expected / 1024**3), flush=True)
-        except Exception as e:
-            print('    下载中断(第%d次) @ %d 字节: %s' % (attempt + 1, got, str(e)[:90]), flush=True)
-        size = os.path.getsize(dest) if os.path.exists(dest) else 0
-        if expected:
-            if size == expected:
-                return size
-            got = size
-            time.sleep(min(30, 3 * (attempt + 1)))
-        else:
-            return size
-    return os.path.getsize(dest) if os.path.exists(dest) else 0
+                print('    下载中断(第%d次) @ %d 字节: %s' % (attempt + 1, got, str(e)[:80]), flush=True)
+                if url_refresh:      # 换新直链（旧直链/旧节点可能不可用）
+                    try:
+                        nu = url_refresh()
+                        if nu:
+                            u = nu
+                    except Exception:
+                        pass
+            s = _size()
+            if expected:
+                if s == expected:
+                    return s
+                got = s
+                time.sleep(min(25, 3 * (attempt + 1)))
+            else:
+                return s
+        if url_refresh:
+            try:
+                nu = url_refresh()
+                if nu:
+                    url = nu
+            except Exception:
+                pass
+        print('  第%d轮未下满 (%s/%s)，稍后继续' % (rnd + 1, best, expected), flush=True)
+        time.sleep(15)
+    return best
 
 
 def rclone_upload(local_path, remote_name, folder_id):
@@ -357,18 +406,27 @@ def main():
                 if existing:
                     print('  gd6 同名文件字节不符(现 %s / 源 %s) → 删除重传' % (existing.get('size'), src_size))
                     gd.delete_file(existing['id'])
+                # CDN 就绪检查：云端离线文件在 CDN 上是逐步铺满的，没铺满就先跳过（不占尝试次数），下轮再来
+                if src_size and not cdn_ready(url, src_size):
+                    print('  云端尚未就绪，本轮跳过，下轮重试: %s' % new_name)
+                    continue
                 attempts += 1
                 local = os.path.join('/tmp', re.sub(r'[^\w.\-]+', '_', new_name))
                 print('  ↓ %s (源 %s 字节)' % (new_name, src_size))
+
+                def _refresh(_f=f, _u=url):
+                    u2, _e = c.prepare_play(_f.get('fileId'), _f.get('shareId') or '')
+                    return u2 or _u
+
                 try:
-                    download(url, local, expected=src_size)
+                    download(url, local, expected=src_size, url_refresh=_refresh)
                 except Exception as e:
                     print('  下载失败', str(e)[:100])
                     if os.path.exists(local): os.remove(local)
                     continue
                 got = os.path.getsize(local)
                 if src_size and got != src_size:
-                    print('  下载不完整(%s/%s) → 放弃本轮' % (got, src_size))
+                    print('  下载不完整(%s/%s) → 本轮放弃，下轮重试' % (got, src_size))
                     os.remove(local); continue
                 print('  ↑ 上传 gd6 (rclone): %s' % new_name)
                 try:
