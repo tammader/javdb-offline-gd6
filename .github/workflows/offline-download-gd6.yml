@@ -52,12 +52,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 装 rclone (照抄 gd-backup 的方式)
+      - name: 装 rclone + aria2
         run: |
           curl -s https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/r.zip
           unzip -q -o /tmp/r.zip -d /tmp
           cp /tmp/rclone-*/rclone /usr/local/bin/
           rclone version | head -1
+          sudo apt-get update -qq && sudo apt-get install -y -qq aria2
+          aria2c --version | head -1
 
       - name: Run pipeline
         run: |
