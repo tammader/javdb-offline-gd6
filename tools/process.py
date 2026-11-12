@@ -15,7 +15,6 @@
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -180,43 +179,17 @@ class CDNBlocked(Exception):
     """CDN 返回 401/403：限流或封禁。此时应立刻停手，留给下一轮，不要硬刚。"""
 
 
-def download(url, dest, expected=None, url_refresh=None, rounds=2):
-    """下载到 dest：aria2c 多连接 + Range 续传，直到字节数达到 expected。
-    被 CDN 拒绝(401/403)时立即抛 CDNBlocked，由调用方延后到下一轮。"""
+def download(url, dest, expected=None, url_refresh=None, rounds=2, attempts=8):
+    """单连接下载到 dest：HTTP Range 断点续传，直到字节数达到 expected。
+    【刻意单线程】—— 多连接并发猛拉会触发 CDN 限流/封禁（同一节点先可用、后被 403）。
+    被 401/403 拒绝时抛 CDNBlocked，由调用方延后到下一轮。"""
     if os.path.exists(dest):
         os.remove(dest)
     best = 0
-
-    def _size():
-        return os.path.getsize(dest) if os.path.exists(dest) else 0
-
     for rnd in range(rounds):
         u = url
-        # --- 1) aria2c（并发降到 4，避免触发 CDN 限流/封禁）---
-        if shutil.which('aria2c'):
-            for attempt in range(2):
-                cmd = ['aria2c', '-x4', '-s4', '-k1M', '--continue=true', '--max-tries=3', '--retry-wait=15',
-                       '--timeout=60', '--file-allocation=none', '--allow-overwrite=true', '--auto-file-renaming=false',
-                       '--console-log-level=warn', '--summary-interval=180',
-                       '-d', os.path.dirname(dest) or '/tmp', '-o', os.path.basename(dest), '--', u]
-                try:
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
-                except Exception as e:
-                    print('    aria2c 异常: %s' % str(e)[:90], flush=True)
-                    break
-                s = _size()
-                best = max(best, s)
-                if expected and s == expected:
-                    return s
-                err = ((r.stderr or '') + (r.stdout or ''))
-                print('    aria2c rc=%s 已下 %s/%s%s' % (r.returncode, s, expected,
-                      (' | ' + err.strip().splitlines()[-1][:120]) if err.strip() else ''), flush=True)
-                if '403' in err or '401' in err:
-                    raise CDNBlocked('aria2c 收到 403/401（限流或封禁）')
-                time.sleep(8)
-        # --- 2) Python HTTP Range 续传 ---
-        got = _size()
-        for attempt in range(5):
+        got = os.path.getsize(dest) if os.path.exists(dest) else 0
+        for attempt in range(attempts):
             headers = {'User-Agent': 'Mozilla/5.0'}
             if got:
                 headers['Range'] = 'bytes=%d-' % got
@@ -238,7 +211,7 @@ def download(url, dest, expected=None, url_refresh=None, rounds=2):
                 if e.code in (401, 403):
                     raise CDNBlocked('HTTP %s（限流或封禁）' % e.code)
                 print('    下载中断(第%d次) @ %d 字节: HTTP %s' % (attempt + 1, got, e.code), flush=True)
-                if url_refresh and e.code == 416:
+                if url_refresh and e.code == 416:      # 换新直链再续
                     try:
                         nu = url_refresh()
                         if nu:
@@ -247,7 +220,7 @@ def download(url, dest, expected=None, url_refresh=None, rounds=2):
                         pass
             except Exception as e:
                 print('    下载中断(第%d次) @ %d 字节: %s' % (attempt + 1, got, str(e)[:70]), flush=True)
-            s = _size()
+            s = os.path.getsize(dest) if os.path.exists(dest) else 0
             if expected:
                 if s == expected:
                     return s
