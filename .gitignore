@@ -1,0 +1,6 @@
+# 敏感/运行时文件，不入库
+_gd.env
+state.json
+links.json
+__pycache__/
+*.pyc
