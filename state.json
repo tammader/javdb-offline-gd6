@@ -21,5 +21,9 @@
   "IPX-219",
   "ABW-183"
  ],
- "failed": {}
+ "failed": {},
+ "offline_quota": {
+  "date": "2026-11-12",
+  "used": {}
+ }
 }
