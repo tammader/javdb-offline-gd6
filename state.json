@@ -504,14 +504,14 @@
   "SSNI-355",
   "NSFS-160",
   "START-255",
-  "SSIS-698"
+  "SSIS-698",
+  "SNOS-221",
+  "SHKD-583",
+  "SONE-573"
  ],
  "failed": {},
  "offline_quota": {
-  "date": "2026-11-14",
-  "used": {
-   "1": 21,
-   "0": 21
-  }
+  "date": "2026-11-15",
+  "used": {}
  }
 }
