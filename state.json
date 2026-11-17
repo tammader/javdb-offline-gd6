@@ -540,11 +540,14 @@
   "IPX-724",
   "VDD-121",
   "SDDE-728",
-  "MIDV-289"
+  "MIDV-289",
+  "DDFF-45",
+  "CAWD-386",
+  "AVOP-301"
  ],
  "failed": {},
  "offline_quota": {
-  "date": "2026-11-16",
+  "date": "2026-11-17",
   "used": {}
  }
 }
