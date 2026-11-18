@@ -546,11 +546,14 @@
   "AVOP-301",
   "PFES-81",
   "JUX-612",
-  "ABP-347"
+  "ABP-347",
+  "IPX-528",
+  "IPX-451",
+  "HUBLK-62"
  ],
  "failed": {},
  "offline_quota": {
-  "date": "2026-11-17",
+  "date": "2026-11-18",
   "used": {}
  }
 }
