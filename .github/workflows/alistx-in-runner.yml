@@ -1,4 +1,4 @@
-name: alistx-in-runner
+﻿name: alistx-in-runner
 
 # 把你的 alistx(tamd258/alistx, 带 WxYunPan 驱动) 直接装在 GitHub runner 里跑：
 #   1) setup-go + go build 出 linux amd64 二进制
@@ -59,4 +59,5 @@ jobs:
       - name: 起 alistx 并量两条腿
         run: |
           cp /tmp/alist ./alist
-          python alistx_runner_test.py
+          python tools/alistx_runner_test.py
+
