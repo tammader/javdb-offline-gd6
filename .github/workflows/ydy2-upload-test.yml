@@ -1,0 +1,75 @@
+name: ydy2-upload-test
+
+# 本机之外的另一条路：用 GitHub runner 直传 ydy2(139 个人云) 的 老/ 目录。
+# 目标：量 runner 侧「无限云盘 → 139 老/」两腿速度，与 alist PUT 那条路做对比。
+#
+# 已验证事实（本机跑出来的）：
+#   * 139 直传是 EOS 分片 PUT，**必须按 partNumber 升序**，乱序返回
+#     400 InvalidPartOrder "fail to get previous part hash context" → -w N 并发不可用
+#   * 分片 100MB（>30GB 用 512MB），一次 create 最多给 100 片，超出走 /file/getUploadUrl
+#   * alist 的 139Yun 驱动本质也是这套，只是串行 + 多一层中转
+#
+# 需要 Secrets: YDY_AUTHORIZATION（139 授权串）, WXYP_ACCOUNTS（无限云盘账号 JSON）
+
+on:
+  workflow_dispatch:
+    inputs:
+      src:
+        description: "gen=随机数据只测上传腿; wxyp=无限云盘抽一段再传（端到端）"
+        required: false
+        default: "gen"
+      gen_mb:
+        description: "gen 模式的数据量(MiB)"
+        required: false
+        default: "512"
+      wxyp_mb:
+        description: "wxyp 模式从无限云盘抽多少 MiB"
+        required: false
+        default: "512"
+      dir:
+        description: "139 目标目录（相对个人云根，如 老 或 老/子目录）"
+        required: false
+        default: "老"
+      part_mb:
+        description: "分片大小(MB)；0=按 139 规则自动(100/512)"
+        required: false
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      YDY_AUTHORIZATION: ${{ secrets.YDY_AUTHORIZATION }}
+      WXYP_ACCOUNTS: ${{ secrets.WXYP_ACCOUNTS }}
+      SRC_MODE: ${{ github.event.inputs.src || 'gen' }}
+      GEN_MB: ${{ github.event.inputs.gen_mb || '512' }}
+      WXYP_MB: ${{ github.event.inputs.wxyp_mb || '512' }}
+      DEST_DIR: ${{ github.event.inputs.dir || '老' }}
+      PART_MB: ${{ github.event.inputs.part_mb || '100' }}
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 打印 runner 出口
+        run: |
+          echo "runner: $RUNNER_NAME / $RUNNER_OS / $(nproc) core"
+          curl -s --max-time 10 https://ipinfo.io/json || true
+
+      - name: 上传腿自测（随机数据）
+        if: env.SRC_MODE == 'gen'
+        run: |
+          python tools/ydy2_direct.py --gen-mb "$GEN_MB" --dir "$DEST_DIR" --part-mb "$PART_MB"
+
+      - name: 端到端（无限云盘 -> 139 老/）
+        if: env.SRC_MODE == 'wxyp'
+        run: |
+          python tools/wxyp_to_ydy2.py --mb "$WXYP_MB" --dir "$DEST_DIR" --part-mb "$PART_MB"
