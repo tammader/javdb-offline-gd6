@@ -51,6 +51,10 @@ jobs:
           git clone --depth 1 --branch "$ALIST_REF" "https://github.com/$ALIST_REPO.git" /tmp/alistx
           cd /tmp/alistx
           echo "commit: $(git rev-parse --short HEAD)"
+          # 前端是 go:embed all:dist 打进去的（public/dist），release 构建才下载真前端；
+          # 这里塞个占位 index.html，让 server/static 的 initIndex 不 FATA —— 只用 API。
+          mkdir -p public/dist
+          printf '<!doctype html><title>alistx</title>' > public/dist/index.html
           go version
           time go build -trimpath -ldflags "-s -w" -o /tmp/alist .
           /tmp/alist version || true
