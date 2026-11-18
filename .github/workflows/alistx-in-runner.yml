@@ -1,0 +1,62 @@
+name: alistx-in-runner
+
+# 把你的 alistx(tamd258/alistx, 带 WxYunPan 驱动) 直接装在 GitHub runner 里跑：
+#   1) setup-go + go build 出 linux amd64 二进制
+#   2) alist admin set / alist server 起服务
+#   3) 建两个存储：/无限云盘(WxYunPan) /ydy2(139Yun personal_new)
+#   4) 量两条腿：alist->139 的 PUT 上传、WxYunPan CDN -> alist 的下载
+#
+# 用途：验上一步的结论（裸脚本 PUT 到 EOS 只有 0.10 MiB/s）在 alistx 里是否一样。
+#
+# 需要 Secrets: WXYP_ACCOUNTS, YDY_AUTHORIZATION
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_mb:
+        description: '本轮测试数据量(MiB)'
+        required: false
+        default: '128'
+      ref:
+        description: 'alistx 分支/标签'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      WXYP_ACCOUNTS: ${{ secrets.WXYP_ACCOUNTS }}
+      YDY_AUTHORIZATION: ${{ secrets.YDY_AUTHORIZATION }}
+      ALIST_REPO: tamd258/alistx
+      ALIST_REF: ${{ github.event.inputs.ref || 'main' }}
+      SRC_MB: ${{ github.event.inputs.src_mb || '128' }}
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+
+      - name: 拉 alistx 源码并编译
+        run: |
+          set -e
+          git clone --depth 1 --branch "$ALIST_REF" "https://github.com/$ALIST_REPO.git" /tmp/alistx
+          cd /tmp/alistx
+          echo "commit: $(git rev-parse --short HEAD)"
+          go version
+          time go build -trimpath -ldflags "-s -w" -o /tmp/alist .
+          /tmp/alist version || true
+          ls -lh /tmp/alist
+
+      - name: 起 alistx 并量两条腿
+        run: |
+          cp /tmp/alist ./alist
+          python alistx_runner_test.py
