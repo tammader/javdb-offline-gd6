@@ -43,6 +43,9 @@ jobs:
       ARCHIVE_FOLDER: '已搬gd6'
       STATE_FILE: state.json
       LINKS_FILE: links.json
+      # ydy2/老 名单（alist 公开接口，免登录可读）；这里的番号不再提交离线，盘上已有的会被删
+      ALIST_BASE: 'https://abcd.tammader.de5.net'
+      YDY2_PATH: '/ydy2/老'
       RCLONE_SELFTEST: ${{ github.event.inputs.selftest == 'true' && 'true' || '' }}
       PYTHONIOENCODING: utf-8
 
