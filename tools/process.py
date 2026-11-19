@@ -175,6 +175,27 @@ def cleanup_by_codes(clients, codes, archive_name):
     return removed
 
 
+# ---------------- Telegram 报告 ----------------
+def tg_send(text):
+    tok = os.environ.get('TG_TOKEN', '').strip()
+    chat = os.environ.get('TG_CHAT_ID', '').strip()
+    if not tok or not chat:
+        print('[tg] 缺 TG_TOKEN / TG_CHAT_ID，跳过报告')
+        return False
+    data = urllib.parse.urlencode({'chat_id': chat, 'text': text[:3900],
+                                   'disable_web_page_preview': 'true'}).encode()
+    req = urllib.request.Request('https://api.telegram.org/bot%s/sendMessage' % tok, data=data,
+                                 headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            j = json.loads(r.read().decode('utf-8', 'replace'))
+        print('[tg] 已发送:', j.get('ok'))
+        return bool(j.get('ok'))
+    except Exception as e:
+        print('[tg] 发送失败:', str(e)[:150])
+        return False
+
+
 def mask_account(acc):
     """公开库日志脱敏：只保留前 2 个字符，其余用 *** 代替（连长度都不泄露）。"""
     s = (acc or '').strip()
@@ -443,6 +464,8 @@ def main():
     if ydy2_codes:
         print('  ydy2/老 已有 %d 个番号，这些不再提交离线' % len(ydy2_codes))
     cleaned = cleanup_by_codes(clients, ydy2_codes, ARCHIVE)
+    global SUBMITTED
+    SUBMITTED = 0
     if cleaned:
         print('  已从无限云盘清理 %d 个「ydy2/老 已有」的文件（含离线任务）' % cleaned)
 
@@ -476,6 +499,7 @@ def main():
             ok = r.get('code') == 200
             print('  离线[%s] %s -> %s' % (tag, code, ok))
             if ok:
+                SUBMITTED += 1
                 # state 只存账号序号，绝不把账号写进会 commit 回公开仓库的文件
                 state['offlined'][code] = {'account_idx': idx, 'ts': time.strftime('%Y-%m-%d %H:%M')}
                 used[str(idx)] = int(used.get(str(idx), 0)) + 1
@@ -582,6 +606,16 @@ def main():
                 print('  ✓ 完成 %s' % new_name)
                 _mark_source(c, f, name)
     print('\n本轮搬运 %d 个' % transferred)
+    try:
+        tg_send('\n'.join([
+            '📥 javdb-offline｜' + time.strftime('%Y-%m-%d %H:%M') + ' (UTC)',
+            'ydy2/老 已有 %d 个番号（不再提交离线）' % len(ydy2_codes),
+            '从无限云盘清理 %d 个（含离线任务）' % cleaned,
+            '清单跳过 %d 条；本轮新提交离线 %d 条' % (skipped, SUBMITTED),
+            '本轮搬运到 gd6: %d 个' % transferred,
+        ]))
+    except Exception as _e:
+        print('[tg] 报告异常:', str(_e)[:120])
 
 
 def _mark_source(c, f, name):
