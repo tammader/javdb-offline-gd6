@@ -99,3 +99,16 @@ class WxYunPan:
         注意：/file/rename 会返回 200「重命名成功」但实际不生效；
         真正生效的是 /disk/rename（body {id, name}）。"""
         return self._req("/disk/rename", "POST", {"id": file_db_id, "name": new_name})
+
+    def delete_tasks(self, task_ids, delete_file=True):
+        """真删离线任务：/task/delBatch {ids:[任务行id], isDelFile:true}
+        注：/file/addDel 会回 200「删除成功」但文件会被任务同步回来（诈尸），不能用于持久删除。"""
+        ids = [str(t) for t in (task_ids or []) if t]
+        if not ids:
+            return {"code": 200, "msg": "nothing"}
+        return self._req("/task/delBatch", "POST", {"ids": ids, "isDelFile": bool(delete_file)})
+
+    def delete_file(self, file_db_id):
+        """兜底：没有对应离线任务的磁盘文件"""
+        return self._req("/file/addDel", "POST", {"id": file_db_id})
+
