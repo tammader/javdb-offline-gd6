@@ -552,7 +552,9 @@
   "HUBLK-62",
   "STSK-213",
   "STARS-734",
-  "SSIS-698"
+  "SSIS-698",
+  "SAME-72",
+  "PRED-444"
  ],
  "failed": {},
  "offline_quota": {
