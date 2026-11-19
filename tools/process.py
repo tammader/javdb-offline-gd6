@@ -62,6 +62,119 @@ def norm_code(name_or_code):
     return s
 
 
+# ---------- ydy2/老 名单（用 alist 公开接口，免登录可读）----------
+ALIST_BASE = (os.environ.get('ALIST_BASE') or 'https://abcd.tammader.de5.net').rstrip('/')
+YDY2_PATH = os.environ.get('YDY2_PATH', '/ydy2/老')
+
+
+def fetch_ydy2_codes():
+    """读 /ydy2/老 的文件名，返回番号集合（norm_code 归一）。
+    该站点 guest 无权强制刷新，会回 403 Refresh without permission → 自动改读缓存。"""
+
+    def _list(refresh):
+        res = set()
+        page = 1
+        while True:
+            body = json.dumps({'path': YDY2_PATH, 'page': page, 'per_page': 200,
+                               'refresh': refresh}).encode()
+            req = urllib.request.Request(ALIST_BASE + '/api/fs/list', data=body,
+                                         headers={'Content-Type': 'application/json',
+                                                  'User-Agent': 'javdb-offline'},
+                                         method='POST')
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    j = json.loads(r.read().decode('utf-8', 'replace'))
+            except Exception as e:
+                print('  [ydy2] 列目录失败:', str(e)[:120])
+                return None
+            if j.get('code') != 200:
+                if refresh and 'Refresh without permission' in str(j.get('message') or ''):
+                    return 'RETRY_CACHE'
+                print('  [ydy2] 接口异常:', j.get('code'), j.get('message'))
+                return None
+            data = j.get('data') or {}
+            content = data.get('content') or []
+            for f in content:
+                if f.get('is_dir'):
+                    continue
+                c = norm_code(f.get('name') or '')
+                if c:
+                    res.add(c)
+            if not content or len(res) >= (data.get('total') or 0):
+                break
+            page += 1
+        return res
+
+    got = _list(True)
+    if got == 'RETRY_CACHE':
+        got = _list(False)
+    return got or set()
+
+
+def cleanup_by_codes(clients, codes, archive_name):
+    """把无限云盘里「ydy2/老 已有」的文件连同离线任务删掉，返回删除个数"""
+    if not codes:
+        return 0
+    removed = 0
+    for c in clients:
+        tag = getattr(c, 'tag', '***')
+        try:
+            tasks = (c.offline_tasks().get('data') or [])
+        except Exception:
+            tasks = []
+        tmap = {}
+        for t in tasks:
+            fid, tid = t.get('fileId'), t.get('id')
+            if fid and tid:
+                tmap[str(fid)] = str(tid)
+        victims = []
+        stack = [('0', '')]
+        guard = 0
+        while stack and guard < 50:
+            guard += 1
+            pid, pname = stack.pop()
+            try:
+                files = c.list_dir(pid)
+            except Exception as e:
+                print('  [清理] 列目录失败', pid, str(e)[:60]); continue
+            for f in files:
+                name = f.get('name', '') or ''
+                if str(f.get('type')) == '2' or f.get('isDir'):
+                    if name != archive_name:
+                        stack.append((f.get('id'), name))
+                    continue
+                code = norm_code(name)
+                if code and code in codes:
+                    victims.append((f, code))
+        if not victims:
+            continue
+        task_ids, fallback = [], []
+        for f, code in victims:
+            tid = tmap.get(str(f.get('fileId')))
+            if tid:
+                task_ids.append(tid)
+            else:
+                fallback.append((f, code))
+        if task_ids:
+            r = c.delete_tasks(task_ids, True)
+            print('  [清理][%s] /task/delBatch %d 条 -> %s %s'
+                  % (tag, len(task_ids), r.get('code'), str(r.get('msg'))[:40]))
+        for f, code in fallback:
+            r = c.delete_file(f.get('id'))
+            print('  [清理][%s] /file/addDel %s -> %s' % (tag, code, r.get('code')))
+        removed += len(victims)
+        time.sleep(2)
+        # 核对
+        try:
+            left = {norm_code(f.get('name', '')) for f in c.list_dir('0')}
+            still = [code for _f, code in victims if code in left]
+            if still:
+                print('  [清理][%s] 仍在盘上: %s' % (tag, ', '.join(still[:5])))
+        except Exception:
+            pass
+    return removed
+
+
 def mask_account(acc):
     """公开库日志脱敏：只保留前 2 个字符，其余用 *** 代替（连长度都不泄露）。"""
     s = (acc or '').strip()
@@ -325,7 +438,21 @@ def main():
     for i in range(len(clients)):
         print('  账号%d 今日剩余额度: %d/%d' % (i, max(0, DAILY_LIMIT - int(used.get(str(i), 0))), DAILY_LIMIT))
 
-    todo = [x for x in links if norm_code(x.get('code', '')) not in state['offlined'] and norm_code(x.get('code','')) not in state['done']]
+    # ydy2/老 已有的番号：既不提交离线，也要把盘上已有的删掉（用户要求：源盘不留目标已有的文件）
+    ydy2_codes = fetch_ydy2_codes()
+    if ydy2_codes:
+        print('  ydy2/老 已有 %d 个番号，这些不再提交离线' % len(ydy2_codes))
+    cleaned = cleanup_by_codes(clients, ydy2_codes, ARCHIVE)
+    if cleaned:
+        print('  已从无限云盘清理 %d 个「ydy2/老 已有」的文件（含离线任务）' % cleaned)
+
+    todo = [x for x in links
+            if norm_code(x.get('code', '')) not in state['offlined']
+            and norm_code(x.get('code', '')) not in state['done']
+            and norm_code(x.get('code', '')) not in ydy2_codes]
+    skipped = len(links) - len(todo)
+    if skipped:
+        print('  跳过 %d 条（已离线/已完成/ydy2已有）' % skipped)
     print('待离线 %d 条' % len(todo))
     per = {}
     for i, x in enumerate(todo):
