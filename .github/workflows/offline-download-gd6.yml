@@ -48,6 +48,8 @@ jobs:
       YDY2_PATH: '/ydy2/老'
       RCLONE_SELFTEST: ${{ github.event.inputs.selftest == 'true' && 'true' || '' }}
       PYTHONIOENCODING: utf-8
+      TG_TOKEN: ${{ secrets.TG_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
