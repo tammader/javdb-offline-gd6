@@ -606,16 +606,20 @@ def main():
                 print('  ✓ 完成 %s' % new_name)
                 _mark_source(c, f, name)
     print('\n本轮搬运 %d 个' % transferred)
-    try:
-        tg_send('\n'.join([
-            '📥 javdb-offline｜' + time.strftime('%Y-%m-%d %H:%M') + ' (UTC)',
-            'ydy2/老 已有 %d 个番号（不再提交离线）' % len(ydy2_codes),
-            '从无限云盘清理 %d 个（含离线任务）' % cleaned,
-            '清单跳过 %d 条；本轮新提交离线 %d 条' % (skipped, SUBMITTED),
-            '本轮搬运到 gd6: %d 个' % transferred,
-        ]))
-    except Exception as _e:
-        print('[tg] 报告异常:', str(_e)[:120])
+    # 只在「真的从无限云盘删掉东西」时才发 Telegram，没删就静默
+    if cleaned > 0:
+        try:
+            tg_send('\n'.join([
+                '📥 javdb-offline｜' + time.strftime('%Y-%m-%d %H:%M') + ' (UTC)',
+                'ydy2/老 已有 %d 个番号（不再提交离线）' % len(ydy2_codes),
+                '从无限云盘清理 %d 个（含离线任务）' % cleaned,
+                '清单跳过 %d 条；本轮新提交离线 %d 条' % (skipped, SUBMITTED),
+                '本轮搬运到 gd6: %d 个' % transferred,
+            ]))
+        except Exception as _e:
+            print('[tg] 报告异常:', str(_e)[:120])
+    else:
+        print('[tg] 本轮没有从无限云盘删掉东西，按设置不发送')
 
 
 def _mark_source(c, f, name):
