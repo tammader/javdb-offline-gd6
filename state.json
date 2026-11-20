@@ -557,11 +557,14 @@
   "PRED-444",
   "SDDE-767",
   "IPZZ-79",
-  "IPZZ-508"
+  "IPZZ-508",
+  "CAWD-900",
+  "ABW-302",
+  "ABF-301"
  ],
  "failed": {},
  "offline_quota": {
-  "date": "2026-11-19",
+  "date": "2026-11-20",
   "used": {}
  }
 }
