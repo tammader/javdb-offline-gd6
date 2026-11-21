@@ -561,11 +561,14 @@
   "CAWD-900",
   "ABW-302",
   "ABF-301",
-  "MIDV-186"
+  "MIDV-186",
+  "MIDV-751",
+  "MIDV-186",
+  "MIDA-79"
  ],
  "failed": {},
  "offline_quota": {
-  "date": "2026-11-20",
+  "date": "2026-11-21",
   "used": {}
  }
 }
